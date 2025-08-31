@@ -55,11 +55,11 @@ The code is modular, with functions for data loading, preprocessing, anomaly det
   - `KAGGLE_USERNAME`, `KAGGLE_KEY`: For KaggleHub dataset access.
 - **Security**:
   - Use Colab Secrets or `.env` for API keys.
-  - Revoke any exposed Kaggle keys (e.g., `17f6be22606c3839c2e942f3dbbd83f1`) via Kaggle > Settings > API > Expire Token.
+  - Revoke any exposed Kaggle keys (e.g., `17f6be22606c3839c2e942f3dbddd83f1`) via Kaggle > Settings > API > Expire Token.
 - **Code**:
   ```python
-  GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC_mpuFY_C4jKQq_RGLzPmR-X70rjmtM5c")
-  SERPAPI_KEY = os.getenv("SERPAPI_KEY", "46cba0dda74df8cb1aec4b685e0290209f5946f75d4e500ee602fa908e11ab8e")
+  GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC_mhfsdfhsh_RGLzPmR-X70rjmtM5c")
+  SERPAPI_KEY = os.getenv("SERPAPI_KEY", "46cba0dda74df890209f5946f75d4e500ee602fa908e11ab8e")
   try:
       KAGGLE_USERNAME = userdata.get('KAGGLE_USERNAME')
       KAGGLE_KEY = userdata.get('KAGGLE_KEY')
