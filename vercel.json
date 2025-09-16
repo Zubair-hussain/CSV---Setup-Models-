@@ -2,14 +2,17 @@
   "version": 2,
   "builds": [
     {
-      "src": "main.py",
+      "src": "server.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "main.py"
+      "dest": "server.py"
     }
-  ]
+  ],
+  "env": {
+    "STREAMLIT_SERVER_PORT": "$PORT"
+  }
 }
