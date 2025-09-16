@@ -11,21 +11,20 @@ import logging
 import io
 import base64
 from huggingface_hub import InferenceClient
-from sklearn.impute import SimpleImputer, IterativeImputer
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.impute import SimpleImputer
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("streamlit-app")
 
 # Configuration
-HF_TOKEN = "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"  # Your Hugging Face token
-SUBSAMPLE_SIZE = 500  # Default to 500 samples for testing
+HF_TOKEN = os.getenv("HF_TOKEN", "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")  # Fallback to hardcoded token
+SUBSAMPLE_SIZE = 200  # Reduced for Vercel free tier memory constraints
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 
-# Lightweight Autoencoder (matches Colab script)
+# Lightweight Autoencoder
 class SmallAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden1=32, hidden2=16):
         super().__init__()
@@ -127,7 +126,7 @@ def get_deepseek_suggestions(sample_data, anomaly_info):
             "Suggest specific data cleaning or preprocessing steps to improve dataset quality and anomaly detection accuracy. "
             "Focus on handling outliers, scaling, or feature engineering. If unsure, say 'Insufficient information'."
         )
-        response = client.generate(prompt, max_tokens=500, temperature=0.7)
+        response = client.generate(prompt, max_tokens=500, temperature=0.7).generated_text
         logger.info("DeepSeek suggestions received")
         return response
     except Exception as e:
@@ -139,8 +138,8 @@ def generate_visualizations(df, errors, threshold, numeric_cols):
     """Generate base64 visualizations for Streamlit."""
     visuals = {}
     plt.figure(figsize=(10, 4))
-    sns.heatmap(df[numeric_cols].isnull().iloc[:500], cbar=False)
-    plt.title("Missing Values (First 500 Rows)")
+    sns.heatmap(df[numeric_cols].isnull().iloc[:200], cbar=False)
+    plt.title("Missing Values (First 200 Rows)")
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
@@ -160,9 +159,9 @@ def generate_visualizations(df, errors, threshold, numeric_cols):
     plt.close()
 
     plt.figure(figsize=(12, 5))
-    sample_for_box = df[numeric_cols].iloc[:1000]
+    sample_for_box = df[numeric_cols].iloc[:200]
     sns.boxplot(data=sample_for_box, orient='h')
-    plt.title("Numeric Distributions (First 1000 Rows)")
+    plt.title("Numeric Distributions (First 200 Rows)")
     plt.xticks(rotation=45)
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
@@ -181,7 +180,7 @@ def main():
 
     # File paths
     default_dataset = "cleaned_creditcard.csv"
-    imputer_path = "simple_imputer.pkl"  # Update if using iterative_imputer.pkl
+    imputer_path = "simple_imputer.pkl"
     autoencoder_path = "autoencoder.pth"
 
     # File uploader
