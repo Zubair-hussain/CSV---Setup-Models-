@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
 import pandas as pd
 import numpy as np
 import torch
@@ -7,25 +8,34 @@ import joblib
 import os
 import logging
 from huggingface_hub import InferenceClient
+from sklearn.impute import SimpleImputer
 import io
-import base64
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("api-app")
+# ---------------------------------------------------
+# Logging setup
+# ---------------------------------------------------
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("fraud-api")
 
+# ---------------------------------------------------
+# API Keys (only from environment variables)
+# ---------------------------------------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+Enter_Kaggle_username = os.getenv("Enter_Kaggle_username")
+Enter_Kaggle_API_key = os.getenv("Enter_Kaggle_API_key")
+Enter_Hugging_Face_API_token = os.getenv("Enter_Hugging_Face_API_token")
+
+# ---------------------------------------------------
 # Config
-HF_TOKEN = os.getenv("HF_TOKEN", "your_fallback_token")
+# ---------------------------------------------------
 SUBSAMPLE_SIZE = 200
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 
-app = FastAPI(title="Credit Card Fraud Detection API")
-
-# Small Autoencoder
+# ---------------------------------------------------
+# Model Definition
+# ---------------------------------------------------
 class SmallAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden1=32, hidden2=16):
         super().__init__()
@@ -43,57 +53,103 @@ class SmallAutoencoder(nn.Module):
     def forward(self, x):
         return self.decoder(self.encoder(x))
 
-# Load models
+# ---------------------------------------------------
+# Helper functions
+# ---------------------------------------------------
 def load_models(imputer_path="simple_imputer.pkl", autoencoder_path="autoencoder.pth"):
-    imputer = joblib.load(imputer_path)
-    model = SmallAutoencoder(input_dim=30)
-    model.load_state_dict(torch.load(autoencoder_path, map_location=torch.device("cpu")))
+    try:
+        imputer = joblib.load(imputer_path)
+        logger.info("Imputer loaded.")
+    except Exception as e:
+        logger.error(f"Imputer load error: {e}")
+        imputer = None
+
+    try:
+        input_dim = 30
+        model = SmallAutoencoder(input_dim=input_dim)
+        model.load_state_dict(torch.load(autoencoder_path, map_location=torch.device("cpu")))
+        logger.info("Autoencoder loaded.")
+    except Exception as e:
+        logger.error(f"Autoencoder load error: {e}")
+        model = None
+
     return imputer, model
 
-imputer, model = load_models()
-
-# API Endpoints
-@app.get("/")
-def home():
-    return {"message": "Credit Card Fraud Detection API is running."}
-
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+def impute_missing_values(df, imputer):
     try:
-        df = pd.read_csv(file.file)
-
-        # Imputation
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        df[numeric_cols] = imputer.transform(df[numeric_cols])
+        df_num_imputed = pd.DataFrame(imputer.transform(df[numeric_cols]), columns=numeric_cols)
+        df[numeric_cols] = df_num_imputed
+        return df
+    except Exception as e:
+        logger.error(f"Imputation error: {e}")
+        return df
 
-        # Anomaly detection
+def detect_anomalies(df, model, class_col="class"):
+    try:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.drop(class_col, errors="ignore")
         X = df[numeric_cols].values.astype(np.float32)
         model.eval()
         with torch.no_grad():
-            X_tensor = torch.tensor(X)
-            recon = model(X_tensor)
-            errors = torch.mean((recon - X_tensor) ** 2, dim=1).numpy()
+            recon = model(torch.tensor(X))
+            errors = torch.mean((recon - torch.tensor(X)) ** 2, dim=1).numpy()
         threshold = np.percentile(errors, 95)
         anomalies = np.where(errors > threshold)[0].tolist()
+        return {"threshold": float(threshold), "anomalies": anomalies, "errors": errors.tolist()}
+    except Exception as e:
+        logger.error(f"Anomaly detection error: {e}")
+        return {"error": str(e)}
 
-        # Call DeepSeek
-        client = InferenceClient(model="deepseek/deepseek-coder-6.7b-instruct", token=HF_TOKEN)
-        sample_data = df.head(5).to_dict(orient="records")
-        anomaly_info = f"{len(anomalies)} anomalies detected (sample: {anomalies[:20]})"
+def get_deepseek_suggestions(sample_data, anomaly_info):
+    try:
+        client = InferenceClient(model="deepseek/deepseek-coder-6.7b-instruct", token=Enter_Hugging_Face_API_token)
         prompt = (
-            f"Analyze this credit card dataset sample: {sample_data[:3]}. "
-            f"Anomaly detection: {anomaly_info}. "
-            "Suggest preprocessing steps to improve quality."
+            f"Dataset sample: {sample_data}. "
+            f"Anomaly info: {anomaly_info}. "
+            "Suggest preprocessing and cleaning steps."
         )
-        deepseek_response = client.generate(prompt, max_tokens=300).generated_text
+        resp = client.generate(prompt, max_tokens=300, temperature=0.7)
+        return resp.generated_text
+    except Exception as e:
+        logger.error(f"DeepSeek API error: {e}")
+        return "DeepSeek suggestions unavailable."
+
+# ---------------------------------------------------
+# FastAPI App
+# ---------------------------------------------------
+app = FastAPI(title="Credit Card Fraud Detection API")
+
+@app.get("/")
+def root():
+    return {"message": "Fraud Detection API is running!"}
+
+@app.post("/process-file")
+async def process_file(file: UploadFile = File(...)):
+    try:
+        # Read CSV
+        content = await file.read()
+        df = pd.read_csv(io.BytesIO(content))
+        logger.info(f"Uploaded dataset shape: {df.shape}")
+
+        # Load models
+        imputer, model = load_models()
+        if imputer is None or model is None:
+            return JSONResponse(content={"error": "Models not loaded."}, status_code=500)
+
+        # Impute
+        df = impute_missing_values(df, imputer)
+
+        # Anomaly detection
+        results = detect_anomalies(df, model)
+
+        # DeepSeek suggestions
+        suggestions = get_deepseek_suggestions(df.head(3).to_dict(orient="records"), results)
 
         return {
             "rows": len(df),
-            "anomalies": anomalies,
-            "threshold": float(threshold),
-            "deepseek_suggestions": deepseek_response
+            "anomaly_results": results,
+            "deepseek_suggestions": suggestions
         }
-
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        return {"error": str(e)}
+        logger.error(f"Processing error: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
