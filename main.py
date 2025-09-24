@@ -1,41 +1,35 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import torch
 import torch.nn as nn
 import joblib
 import os
 import logging
+import io
+import base64
 from huggingface_hub import InferenceClient
 from sklearn.impute import SimpleImputer
-import io
 
-# ---------------------------------------------------
 # Logging setup
-# ---------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("fraud-api")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("streamlit-app")
 
-# ---------------------------------------------------
-# API Keys (only from environment variables)
-# ---------------------------------------------------
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-Enter_Kaggle_username = os.getenv("Enter_Kaggle_username")
-Enter_Kaggle_API_key = os.getenv("Enter_Kaggle_API_key")
-Enter_Hugging_Face_API_token = os.getenv("Enter_Hugging_Face_API_token")
+# 🔑 API Keys (loaded from Streamlit secrets / environment variables)
+HF_TOKEN = os.getenv("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")
+GEMINI_API_KEY = os.getenv("AIzaSyC_mpuFY_C4jKQq_RGLzPmR-X70rjmtM5c")
+KAGGLE_USERNAME = os.getenv("zubairhussain786")
+KAGGLE_API_KEY = os.getenv("17f6be22606c3839c2e942f3dbbd83f1")
 
-# ---------------------------------------------------
-# Config
-# ---------------------------------------------------
-SUBSAMPLE_SIZE = 200
+# Configuration
+SUBSAMPLE_SIZE = 200  # keep small for free tier
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 
-# ---------------------------------------------------
-# Model Definition
-# ---------------------------------------------------
+# Lightweight Autoencoder
 class SmallAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden1=32, hidden2=16):
         super().__init__()
@@ -53,103 +47,195 @@ class SmallAutoencoder(nn.Module):
     def forward(self, x):
         return self.decoder(self.encoder(x))
 
-# ---------------------------------------------------
-# Helper functions
-# ---------------------------------------------------
+# Helper Functions
 def load_models(imputer_path="simple_imputer.pkl", autoencoder_path="autoencoder.pth"):
+    """Load imputer and autoencoder models."""
     try:
         imputer = joblib.load(imputer_path)
-        logger.info("Imputer loaded.")
+        logger.info(f"Loaded imputer from {imputer_path}")
     except Exception as e:
-        logger.error(f"Imputer load error: {e}")
-        imputer = None
+        logger.error(f"Error loading imputer: {e}")
+        return None, None
 
     try:
-        input_dim = 30
+        input_dim = 30  # adjust if your dataset changes
         model = SmallAutoencoder(input_dim=input_dim)
         model.load_state_dict(torch.load(autoencoder_path, map_location=torch.device("cpu")))
-        logger.info("Autoencoder loaded.")
+        logger.info(f"Loaded autoencoder from {autoencoder_path}")
+        return imputer, model
     except Exception as e:
-        logger.error(f"Autoencoder load error: {e}")
-        model = None
+        logger.error(f"Error loading autoencoder: {e}")
+        return imputer, None
 
-    return imputer, model
+def load_and_subsample(file_path, subsample_size=SUBSAMPLE_SIZE):
+    """Load and subsample dataset."""
+    try:
+        df = pd.read_csv(file_path)
+        logger.info(f"Loaded dataset with shape: {df.shape}")
+        if subsample_size and subsample_size < len(df):
+            df = df.sample(n=subsample_size, random_state=RANDOM_SEED).reset_index(drop=True)
+            logger.info(f"Subsampled to: {df.shape}")
+        df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
+        df = df.apply(lambda col: pd.to_numeric(col, errors="coerce") if col.dtype == "object" else col)
+        return df
+    except Exception as e:
+        logger.error(f"Error loading dataset: {e}")
+        return None
 
 def impute_missing_values(df, imputer):
+    """Impute missing values using loaded imputer."""
     try:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        df_num_imputed = pd.DataFrame(imputer.transform(df[numeric_cols]), columns=numeric_cols)
-        df[numeric_cols] = df_num_imputed
-        return df
+        if not numeric_cols:
+            logger.warning("No numeric columns found; skipping imputation")
+            return df
+        df_num = df[numeric_cols].copy()
+        df_num_imputed = pd.DataFrame(imputer.transform(df_num), columns=df_num.columns)
+        df_imputed = df.copy()
+        df_imputed[numeric_cols] = df_num_imputed
+        logger.info("Imputation completed")
+        return df_imputed
     except Exception as e:
         logger.error(f"Imputation error: {e}")
         return df
 
-def detect_anomalies(df, model, class_col="class"):
+def detect_anomalies_autoencoder(df, model, class_col="class"):
+    """Detect anomalies using loaded autoencoder."""
     try:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.drop(class_col, errors="ignore")
         X = df[numeric_cols].values.astype(np.float32)
         model.eval()
         with torch.no_grad():
-            recon = model(torch.tensor(X))
-            errors = torch.mean((recon - torch.tensor(X)) ** 2, dim=1).numpy()
+            X_tensor = torch.tensor(X)
+            recon = model(X_tensor)
+            errors = torch.mean((recon - X_tensor) ** 2, dim=1).numpy()
         threshold = np.percentile(errors, 95)
-        anomalies = np.where(errors > threshold)[0].tolist()
-        return {"threshold": float(threshold), "anomalies": anomalies, "errors": errors.tolist()}
+        anomaly_indices = np.where(errors > threshold)[0].tolist()
+        logger.info(f"Anomaly detection: threshold={threshold:.6g}, anomalies_found={len(anomaly_indices)}")
+        return anomaly_indices, errors, threshold, numeric_cols.tolist()
     except Exception as e:
         logger.error(f"Anomaly detection error: {e}")
-        return {"error": str(e)}
+        return [], np.zeros(len(df)), 0, []
 
 def get_deepseek_suggestions(sample_data, anomaly_info):
+    """Call DeepSeek API for cleaning suggestions."""
+    if not HF_TOKEN:
+        return "⚠️ Hugging Face token missing. Please set Enter_Hugging_Face_API_token in secrets."
     try:
-        client = InferenceClient(model="deepseek/deepseek-coder-6.7b-instruct", token=Enter_Hugging_Face_API_token)
+        client = InferenceClient(model="deepseek/deepseek-coder-6.7b-instruct", token=HF_TOKEN)
         prompt = (
-            f"Dataset sample: {sample_data}. "
-            f"Anomaly info: {anomaly_info}. "
-            "Suggest preprocessing and cleaning steps."
+            f"Analyze this dataset sample: {sample_data[:3]}. "
+            f"Anomaly detection results: {anomaly_info}. "
+            "Suggest specific data cleaning or preprocessing steps."
         )
-        resp = client.generate(prompt, max_tokens=300, temperature=0.7)
-        return resp.generated_text
+        response = client.generate(prompt, max_tokens=500, temperature=0.7).generated_text
+        logger.info("DeepSeek suggestions received")
+        return response
     except Exception as e:
         logger.error(f"DeepSeek API error: {e}")
-        return "DeepSeek suggestions unavailable."
+        return "DeepSeek suggestions unavailable"
 
-# ---------------------------------------------------
-# FastAPI App
-# ---------------------------------------------------
-app = FastAPI(title="Credit Card Fraud Detection API")
+def generate_visualizations(df, errors, threshold, numeric_cols):
+    """Generate base64 visualizations for Streamlit."""
+    visuals = {}
 
-@app.get("/")
-def root():
-    return {"message": "Fraud Detection API is running!"}
+    # Missing Values Heatmap
+    plt.figure(figsize=(10, 4))
+    sns.heatmap(df[numeric_cols].isnull().iloc[:200], cbar=False)
+    plt.title("Missing Values (First 200 Rows)")
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    visuals["missing_heatmap"] = base64.b64encode(buf.read()).decode("utf-8")
+    plt.close()
 
-@app.post("/process-file")
-async def process_file(file: UploadFile = File(...)):
-    try:
-        # Read CSV
-        content = await file.read()
-        df = pd.read_csv(io.BytesIO(content))
-        logger.info(f"Uploaded dataset shape: {df.shape}")
+    # Reconstruction Errors
+    plt.figure(figsize=(10, 4))
+    plt.scatter(range(len(errors)), errors, s=6)
+    plt.axhline(threshold, ls="--", color="red")
+    plt.title("Reconstruction Errors")
+    plt.xlabel("Row Index")
+    plt.ylabel("Error")
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    visuals["error_scatter"] = base64.b64encode(buf.read()).decode("utf-8")
+    plt.close()
 
-        # Load models
-        imputer, model = load_models()
-        if imputer is None or model is None:
-            return JSONResponse(content={"error": "Models not loaded."}, status_code=500)
+    # Boxplot
+    plt.figure(figsize=(12, 5))
+    sample_for_box = df[numeric_cols].iloc[:200]
+    sns.boxplot(data=sample_for_box, orient="h")
+    plt.title("Numeric Distributions (First 200 Rows)")
+    plt.xticks(rotation=45)
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    buf.seek(0)
+    visuals["boxplot"] = base64.b64encode(buf.read()).decode("utf-8")
+    plt.close()
 
-        # Impute
-        df = impute_missing_values(df, imputer)
+    logger.info("Visualizations generated")
+    return visuals
 
-        # Anomaly detection
-        results = detect_anomalies(df, model)
+# Streamlit App
+def main():
+    st.set_page_config(page_title="Credit Card Fraud Detection", layout="wide")
+    st.title("Credit Card Fraud Detection App")
 
-        # DeepSeek suggestions
-        suggestions = get_deepseek_suggestions(df.head(3).to_dict(orient="records"), results)
+    default_dataset = "cleaned_creditcard.csv"
+    imputer_path = "simple_imputer.pkl"
+    autoencoder_path = "autoencoder.pth"
 
-        return {
-            "rows": len(df),
-            "anomaly_results": results,
-            "deepseek_suggestions": suggestions
-        }
-    except Exception as e:
-        logger.error(f"Processing error: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    uploaded_file = st.file_uploader("Upload a CSV file (optional)", type=["csv"])
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        st.write(f"Uploaded dataset shape: {df.shape}")
+    else:
+        if os.path.exists(default_dataset):
+            df = load_and_subsample(default_dataset, SUBSAMPLE_SIZE)
+            st.write(f"Using default dataset with {SUBSAMPLE_SIZE} samples, shape: {df.shape}")
+        else:
+            st.error("Default dataset not found. Please upload a CSV.")
+            return
+
+    if df is None:
+        st.error("Failed to load dataset.")
+        return
+
+    st.subheader("Data Preview")
+    st.dataframe(df.head())
+
+    imputer, model = load_models(imputer_path, autoencoder_path)
+    if imputer is None or model is None:
+        st.error("Model loading failed.")
+        return
+
+    df_imputed = impute_missing_values(df, imputer)
+    st.write("✅ Missing values imputed.")
+
+    anomaly_indices, errors, threshold, numeric_cols = detect_anomalies_autoencoder(df_imputed, model)
+    st.write(f"🔎 {len(anomaly_indices)} anomalies detected (sample indices: {anomaly_indices[:20]})")
+
+    st.subheader("DeepSeek Cleaning Suggestions")
+    sample_data = df_imputed.head(5).to_dict(orient="records")
+    deepseek_suggestions = get_deepseek_suggestions(sample_data, f"{len(anomaly_indices)} anomalies")
+    st.write(deepseek_suggestions)
+
+    st.subheader("Visualizations")
+    visuals = generate_visualizations(df_imputed, errors, threshold, numeric_cols)
+    for key, b64 in visuals.items():
+        st.write(f"**{key.replace('_', ' ').title()}**")
+        st.image(base64.b64decode(b64))
+
+    # Download processed dataset
+    output_csv = io.StringIO()
+    df_imputed.to_csv(output_csv, index=False)
+    st.download_button(
+        label="Download Processed Dataset",
+        data=output_csv.getvalue(),
+        file_name="processed_creditcard.csv",
+        mime="text/csv"
+    )
+
+if __name__ == "__main__":
+    main()
