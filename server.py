@@ -1,10 +1,5 @@
-import subprocess
-import os
+# server.py
 
-# Run Streamlit app
-def start_streamlit():
-    os.environ["STREAMLIT_SERVER_PORT"] = os.getenv("PORT", "8501")
-    subprocess.run(["streamlit", "run", "main.py", "--server.headless", "true", "--server.address", "0.0.0.0"])
+from main import app  # Import FastAPI app from main.py
 
-if __name__ == "__main__":
-    start_streamlit()
+# Vercel looks for `app` here automatically, so no need for subprocess or Streamlit.
